@@ -1,0 +1,4 @@
+gymnasium
+torch
+rasterio
+numpy
