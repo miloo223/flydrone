@@ -28,7 +28,7 @@ def train():
     #############################################
 
     # 1. Environment Setup
-    env = DroneEnv(dem_path='dem_data/image.tif')
+    env = DroneEnv(dem_path='dem_data/image_cut.tif', render_mode='human')
     # For simplicity, we flatten the observation space
     state_dim = env.observation_space['position'].shape[0] + env.observation_space['velocity'].shape[0]
     action_dim = env.action_space.shape[0]
@@ -50,7 +50,7 @@ def train():
             
             # Select action with policy
             action = agent.select_action(state_flat)
-            state, reward, terminated, truncated, _ = env.step(action)
+            state, reward, terminated, truncated, info = env.step(action)
 
             # Saving reward and is_terminals
             agent.buffer_rewards.append((reward, terminated or truncated))
@@ -68,6 +68,7 @@ def train():
                 print(f"Episode: {i_episode}, Timestep: {time_step}, Average Reward: {avg_reward:.3f}")
 
             if terminated or truncated:
+                print(f"Episode {i_episode} finished. Total True Explored Area: {info['total_true_explored_area']:.2f}")
                 break
         
         i_episode += 1

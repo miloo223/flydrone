@@ -15,11 +15,12 @@ def load_dem(tif_path: str) -> np.ndarray:
         with rasterio.open(tif_path) as dataset:
             # Read the first band
             dem_data = dataset.read(1)
-            print(f"Successfully loaded DEM data from {tif_path}. Shape: {dem_data.shape}")
-            return dem_data
+            resolution = dataset.res[0] # Assuming square pixels
+            print(f"Successfully loaded DEM data from {tif_path}. Shape: {dem_data.shape}, Resolution: {resolution}")
+            return dem_data, resolution
     except Exception as e:
         print(f"Error loading DEM file: {e}")
-        return None
+        return None, None
 
 if __name__ == '__main__':
     # Example usage:

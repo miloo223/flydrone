@@ -16,30 +16,46 @@ def compute_viewshed(dem, resolution, origin_x, origin_y,
         max_distance = max(n_rows, n_cols) * cell
 
     # 드론 그리드 인덱스 및 절대 고도
+    # Convert world coordinates to grid coordinates
     obs_i = int((obs_y - origin_y) / cell)
     obs_j = int((obs_x - origin_x) / cell)
-    z_obs = dem[obs_i, obs_j] + obs_height
+
+    # Ensure observer is within DEM bounds
+    if not (0 <= obs_i < n_rows and 0 <= obs_j < n_cols):
+        # Observer is outside DEM, no viewshed possible
+        return np.zeros_like(dem, dtype=bool), (obs_i, obs_j, obs_height)
+
+    z_obs = obs_height # Use drone's absolute height
 
     visible = np.zeros_like(dem, dtype=bool)
     angles = np.linspace(yaw - fov_h/2, yaw + fov_h/2, num_directions)
 
     for theta in angles:
         max_angle = -np.inf
-        step = 1
-        while True:
-            d = step * cell
-            if d > max_distance:
-                break
-            di = int(round(step * math.sin(theta)))
-            dj = int(round(step * math.cos(theta)))
-            i, j = obs_i + di, obs_j + dj
+        # Start ray from observer's grid cell
+        # Iterate outwards from the observer
+        for step_dist in np.arange(cell, max_distance + cell, cell):
+            # Calculate world coordinates of the point along the ray
+            wx = obs_x + step_dist * math.cos(theta)
+            wy = obs_y + step_dist * math.sin(theta)
+
+            # Convert world coordinates to grid coordinates
+            i = int((wy - origin_y) / cell)
+            j = int((wx - origin_x) / cell)
+
             if not (0 <= i < n_rows and 0 <= j < n_cols):
-                break
-            angle = math.atan2(dem[i,j] - z_obs, d)
+                break # Out of DEM bounds
+            
+            # Get elevation at current point
+            dem_z = dem[i,j]
+
+            # Calculate angle from observer to current point
+            # Use step_dist as horizontal distance
+            angle = math.atan2(dem_z - z_obs, step_dist)
+
             if angle > max_angle:
                 max_angle = angle
                 visible[i,j] = True
-            step += 1
 
     return visible, (obs_i, obs_j, z_obs)
 
@@ -52,8 +68,6 @@ def calculate_visible_area(mask, resolution):
     return np.sum(mask) * cell_area
 
 # drone_viewshed.py (추가)
-
-import numpy as np
 
 def cell_true_area(i, j, dem, dx, dy):
     """그리드 셀 (i,j)의 실제 표면 면적을 삼각형 분할로 계산."""

@@ -30,7 +30,7 @@ class ActorCritic(nn.Module):
     def act(self, state):
         action_mean = self.actor(state)
         cov_mat = torch.diag(self.action_var)
-        dist = Normal(action_mean, cov_mat.sqrt())
+        dist = Normal(action_mean, self.action_var.sqrt())
         action = dist.sample()
         action_logprob = dist.log_prob(action)
         return action.detach(), action_logprob.detach()
@@ -39,7 +39,7 @@ class ActorCritic(nn.Module):
         action_mean = self.actor(state)
         action_var = self.action_var.expand_as(action_mean)
         cov_mat = torch.diag_embed(action_var)
-        dist = Normal(action_mean, cov_mat.sqrt())
+        dist = Normal(action_mean, self.action_var.sqrt())
         action_logprobs = dist.log_prob(action)
         dist_entropy = dist.entropy()
         state_values = self.critic(state)
@@ -62,6 +62,7 @@ class PPOAgent:
         
         self.MseLoss = nn.MSELoss()
         self.buffer = []
+        self.buffer_rewards = []
 
     def select_action(self, state):
         with torch.no_grad():
