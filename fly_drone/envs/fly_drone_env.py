@@ -16,7 +16,7 @@ env_name = "fly_drone-v0"
 scores, episodes = [], []
 all_polygons = []
 drone_path = []
-tif_path = "fly_drone/envs/image_cut.tif"
+tif_path = "flydrone/fly_drone/envs/image_cut.tif"
 
 time = 0
 
@@ -244,7 +244,7 @@ class Fly_drone(gym.Env):
             ax.set_ylabel("Y (m)")
             ax.legend()
             plt.tight_layout()
-            plt.savefig(f"Area_fig/episode_{self.episode}_map.svg")
+            plt.savefig(f"flydrone/Area_fig/episode_{self.episode}_map.svg")
             plt.close()
 
             pylab.plot(episodes, scores, 'b')
