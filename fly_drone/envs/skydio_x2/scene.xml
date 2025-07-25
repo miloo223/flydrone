@@ -1,0 +1,16 @@
+<mujoco model="Skydio X2 scene">
+  <include file="x2.xml"/>
+
+  <asset>
+    <hfield name="terrain" nrow="500" ncol="500" size="500 500 120 0.05"/>
+  </asset>
+
+  <worldbody>
+    <geom type="hfield" hfield="terrain"
+          pos="0 0 0"
+          rgba="0.6 0.5 0.4 1"/>
+    <!camera name="view" mode="track" pos="491.262 -11127.187 9767.584" xyaxes="1.000 0.029 -0.000 -0.020 0.709 0.705"/>
+    <camera name="top_view" mode="track" pos="0 0 2" target="x2"/>
+    
+  </worldbody>
+</mujoco>
