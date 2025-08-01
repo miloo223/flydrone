@@ -21,7 +21,8 @@ env_name = "fly_drone-v0"
 scores, episodes = [], []
 all_polygons = []
 drone_path = []
-tif_path = "fly_drone/envs/image_cut.tif"
+tif_path = "fly_drone/envs/image_cut_1km.tif"
+#tif_path = "fly_drone/envs/image_cut.tif"
 
 time = 0
 
@@ -39,9 +40,10 @@ drone_z_velocity = 0.0
 roll, pitch, yaw = 0, 0, 0
 explored_area = 0
 
-N = 30
+# 광선 개수 조절
+N = 16 # 원래 30이었는데 16으로 줄임
 STEP_SIZE = 1.0
-MAX_STEPS = 200
+MAX_STEPS = 100 # 원래 200이었음
 
 def rpy_to_matrix(roll, pitch, yaw):
     Rx = np.array([[1, 0, 0],
@@ -360,12 +362,15 @@ def energy_penalty_from_action(acc_world: np.ndarray,
     return penalty, w, P, dict(T=T, Mx=Mx, My=My, total_power=total_power, energy=energy)
 
 
+# 현재 시간 불러와서 그걸로 폴더 저장
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
+KST = timezone(timedelta(hours=9))
 
 class Fly_drone(gym.Env):
     MAX_VERTICES = 8
-
-    def __init__(self):
+    def __init__(self, log_dir: Path, plot_dir: Path):
         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
         self.done = False
@@ -376,7 +381,64 @@ class Fly_drone(gym.Env):
         self.score_avg = 0
         self.target_area = None
         self.POLY_ENLARGE = 3.0
+        self.max_xy_speed = 8.0   # 수평(xy) 최대 속도 [m/s]
+        self.max_z_speed = 5.0     # 수직(z) 최대 속도 [m/s]
+        self._log_dir  = log_dir
+        self._plot_dir = plot_dir
+        self.LOG_EVERY_STEPS = 20 # 에피소드 중 특정 스텝마다 로그 
+        self._step_idx = 0
+        self._log_buf  = []
 
+        (self._plot_dir / "maps").mkdir(parents=True, exist_ok=True)
+    
+    def _flush_log(self):
+        """20스텝마다 호출되어 _log_buf → CSV 로 쓴다."""
+        if not self._log_buf:
+            return
+
+        fname = self._log_dir / f"episode_{self.episode}.csv"
+
+        # ── (A) 새 에피소드면 헤더부터 쓰기 ───────────────────────
+        write_header = not fname.exists()
+        mode = "a"    # append, 헤더가 필요하면 아래에서 w+a 처리
+
+        with open(fname, "a") as f:
+            if write_header:
+                f.write("time,x,y,z\n")        # 헤더 한 줄
+            for t, x, y, z in self._log_buf:
+                f.write(f"{t:.2f},{x:.2f},{y:.2f},{z:.2f}\n")
+
+        self._log_buf.clear()
+
+    
+
+    def _limit_speed(self):
+        global drone_xy_velocity, drone_z_velocity
+        # XY 평면 속도 제한 (벡터 노름 기준)
+        v_xy = np.linalg.norm(drone_xy_velocity)
+        if v_xy > self.max_xy_speed:
+            drone_xy_velocity *= (self.max_xy_speed / (v_xy + 1e-8))
+        # Z 속도 제한 (스칼라이므로 clip)
+        drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
+
+    def _build_state(self) -> np.ndarray:
+        """
+        x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
+        target_area 폴리곤 꼭짓점들을 모두 합쳐서 반환합니다.
+        """
+        # 1) 위치·속도·자세·면적
+        state = [
+            drone_xy[0], drone_xy[1], drone_alt,
+            drone_xy_velocity[0], drone_xy_velocity[1], drone_z_velocity,
+            roll, pitch, yaw,
+            explored_area
+        ]
+            # 2) 타깃 폴리곤 꼭짓점
+        verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
+        state.extend(verts.flatten().tolist())
+
+        return np.array(state, dtype=np.float32)
+    
     def step(self, action):
         global time
         global drone_xy, drone_xy_velocity, drone_alt, drone_z_velocity
@@ -388,6 +450,7 @@ class Fly_drone(gym.Env):
 
         # --------- 2) 상태 적분 ---------
         time += DT
+        self._step_idx += 1
         # pos
         drone_xy[0] += ax * 0.5 * DT**2 + drone_xy_velocity[0] * DT
         drone_xy[1] += ay * 0.5 * DT**2 + drone_xy_velocity[1] * DT
@@ -396,19 +459,24 @@ class Fly_drone(gym.Env):
         drone_xy_velocity[0] += ax * DT
         drone_xy_velocity[1] += ay * DT
         drone_z_velocity     += az * DT
+        self._limit_speed()
+
 
         # --------- 3) DEM/ground alt ---------
         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
         px, py = px[0], py[0]
+
         if not (0 <= px < width and 0 <= py < height):
             # out of bounds -> 끝내고 큰 페널티
             reward = -1000.0
             self.total_return += reward
             self.done = True
+            #return self._build_state(), reward, self.done, {}
             return self._build_state(), reward, self.done, {}
-
+    
         ground_alt = dem[py, px]
 
+        '''
         # --------- 4) 시야 레이캐스팅 (기존) ---------
         u = np.linspace(-np.tan(FOV_RAD_X / 2), np.tan(FOV_RAD_X / 2), N)
         v = np.linspace(-np.tan(FOV_RAD_Y / 2), np.tan(FOV_RAD_Y / 2), N)
@@ -421,13 +489,6 @@ class Fly_drone(gym.Env):
         intersections = []
 
         drone_path.append((drone_xy[0], drone_xy[1]))
-
-        # state (관측) 구성용 (기존)
-        state1 = [drone_xy[i] for i in range(2)]
-        state2 = [drone_xy_velocity[i] for i in range(2)]
-        state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
-        target_vertices = np.array(self.target_area.exterior.coords)
-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
 
         for d in dirs_world:
             ray_pos = np.array([*drone_xy, drone_alt], dtype=np.float32)
@@ -442,6 +503,56 @@ class Fly_drone(gym.Env):
                         break
                 else:
                     break
+        '''
+                # ------------------------------------------------------------------
+        # 4) 시야 레이캐스팅 (벡터화 버전)
+        # ------------------------------------------------------------------
+        u = np.linspace(-np.tan(FOV_RAD_X / 2), np.tan(FOV_RAD_X / 2), N)
+        v = np.linspace(-np.tan(FOV_RAD_Y / 2), np.tan(FOV_RAD_Y / 2), N)
+        dirs_local = np.stack(np.meshgrid(u, v), axis=-1).reshape(-1, 2)        # (M,2)
+        dirs_local = np.c_[dirs_local, -np.ones(len(dirs_local))]               # (M,3)
+        dirs_local /= np.linalg.norm(dirs_local, axis=1, keepdims=True)
+
+        R          = rpy_to_matrix(roll, pitch, yaw)
+        dirs_world = dirs_local @ R.T                                           # (M,3)
+
+        drone_xyz  = np.array([*drone_xy, drone_alt], dtype=np.float32)
+        M,  S      = len(dirs_world), MAX_STEPS
+        dists      = np.arange(1, S + 1, dtype=np.float32) * STEP_SIZE          # (S,)
+
+        # ▶ 모든 (ray × step) 좌표 한꺼번에 계산
+        pts = (drone_xyz + dirs_world[:, None, :] * dists[None, :, None])       # (M,S,3)
+        pts2d = pts[..., :2].reshape(-1, 2)                                     # (M·S,2)
+
+        # 픽셀 인덱스
+        px = ((pts2d[:, 0] - x0) / x_res).astype(int)
+        py = ((y0 - pts2d[:, 1]) / y_res).astype(int)
+        valid = (0 <= px) & (px < width) & (0 <= py) & (py < height)
+
+        # 지형 고도 vs 광선 z 비교
+        z_ground = np.empty_like(px, dtype=np.float32)
+        z_ground[valid] = dem[py[valid], px[valid]]
+        z_ray = pts[..., 2].reshape(-1)
+        hit = valid & (z_ray <= z_ground)
+
+        # ▶ 각 레이에 대해 '가장 처음' 맞은 인덱스 추출
+        hit_idx_flat = np.where(hit)[0]
+        ray_idx      = hit_idx_flat // S
+        step_idx     = hit_idx_flat %  S
+        first_hit_mask = np.zeros_like(hit, dtype=bool)
+        first_hit_mask[np.minimum.reduceat(hit_idx_flat, np.unique(ray_idx, return_index=True)[1])] = True
+
+        intersections = pts2d[first_hit_mask].tolist()          # [(x,y), …]
+
+        drone_path.append((*drone_xy, drone_alt))               # z 포함 저장 권장
+
+                # state (관측) 구성용 (기존)
+        state1 = [drone_xy[i] for i in range(2)]
+        state2 = [drone_xy_velocity[i] for i in range(2)]
+        state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+        target_vertices = np.array(self.target_area.exterior.coords)
+        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
+
 
         # --------- 5) 면적 보상 (patched & robust) ---------
         area_reward = 0.0
@@ -500,17 +611,35 @@ class Fly_drone(gym.Env):
             acc_world, vel_world, Mx, My, quad_params, dt=DT
         )
 
+        # 전체 리워드
         reward = area_reward + altitude_reward + penalty_E
         self.total_return += reward
 
         # --------- 8) 종료 조건 ---------
+        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+        px, py = px[0], py[0]
+            
         self._check_done(ground_alt)
         if self.done:
             self.plot(self.train)
             self.episode += 1
 
+        self._log_buf.append((time, drone_xy[0], drone_xy[1], drone_alt))
+        if self._step_idx % self.LOG_EVERY_STEPS == 0:
+            self._flush_log()
+
+        
+
         # info에 에너지 디버깅 정보 넣어두면 학습 중 로깅하기 좋음
         info = {"energy": info_E["energy"], "power_total": info_E["total_power"], "Mx": Mx, "My": My}
+
+
+        # 100번마다 로그 나옴
+        if self._step_idx % 100 == 0:      # 100스텝마다
+            print(f"[env] ep{self.episode} step{self._step_idx}"
+                f"  t={time:.1f}s  reward={reward:.2f}")
+        # ---------------------------------------------------------
+
         return state, reward, self.done, info
 
 
@@ -525,6 +654,7 @@ class Fly_drone(gym.Env):
         drone_xy_velocity = np.array([0.0, 0.0])
         drone_z_velocity = 0.0
         roll, pitch, yaw, explored_area = 0, 0, 0, 0
+        dem_minx, dem_miny, dem_maxx, dem_maxy = bounds
 
         drone_path = []
         drone_path.append((drone_xy[0], drone_xy[1]))
@@ -533,12 +663,13 @@ class Fly_drone(gym.Env):
         drone_alt = ground_alt + 10 #리셋 높이
 
         # ---- Create a random *valid* target area with fixed number of vertices ----
-        center_x = drone_xy[0] + np.random.uniform(-50, 50)
-        center_y = drone_xy[1] + np.random.uniform(-50, 50)
+        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
+        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
+
 
         num_points = self.MAX_VERTICES
         # “조금 더 큰 범위” -> 반지름 범위를 키움
-        radius = np.random.uniform(500, 1000)
+        radius = np.random.uniform(100, 200)
 
         angles = np.sort(np.random.uniform(0, 2 * np.pi, num_points))
         points = []
@@ -608,15 +739,16 @@ class Fly_drone(gym.Env):
                 ax.plot(path_x, path_y, 'r-', linewidth=2, label='Drone Path')
                 ax.plot(path_x[-1], path_y[-1], 'ro', label='Final Position')
 
+            self._plot_dir.mkdir(exist_ok=True)
             ax.set_title(f"Episode {self.episode}: Explored Area and Path")
             ax.set_xlabel("X (m)")
             ax.set_ylabel("Y (m)")
             ax.legend()
             plt.tight_layout()
-            plt.savefig(f"Area_fig/episode_{self.episode}_map.svg")
+            plt.savefig(self._plot_dir / "maps" / f"episode_{self.episode}_map.svg")
             plt.close()
 
             pylab.plot(episodes, scores, 'b')
             pylab.xlabel("episode")
             pylab.ylabel("average score")
-            pylab.savefig("PPO_reward.png")
+            pylab.savefig(self._plot_dir /"reward_curve.png")

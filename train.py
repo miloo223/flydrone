@@ -3,20 +3,65 @@ import os
 from datetime import datetime
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, ProgressBarCallback
 from fly_drone.envs import fly_drone_env
-
-# ---- 추가 import (그래프/CSV) ----
 import torch
 import csv
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # 서버에서도 그림 저장되게
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+from run_manager import create_session
+import yaml
 
-# ---------------- Reward Plot Callback ----------------
+# run manager에서 실행할 부분들
+cfg = dict(
+    algo="PPO",
+    env_name="FlyDrone-v0",
+    total_timesteps=10_000,#실행시 2_000_000, 테스트시 10_000,
+    log_every_steps=20,
+    checkpoint_freq=10_000,
+    lr=3e-4,
+    n_steps=2048,
+    gamma=0.99,
+    etc="…"
+)
+
+SESSION_DIR = create_session(cfg)
+LOG_DIR      = SESSION_DIR / "logs"
+PLOT_DIR     = SESSION_DIR / "plots"
+MODEL_DIR    = SESSION_DIR / "models"
+TB_DIR       = SESSION_DIR / "tensorboard"
+
+print('> 1')
+# gym 등록(한 번만)
+import gym
+ENV_ID = "FlyDrone-v0-custom"           # 새 이름
+if ENV_ID not in gym.envs.registry:
+    gym.register(
+        id=ENV_ID,
+        entry_point="fly_drone.envs.fly_drone_env:Fly_drone",
+        kwargs=dict(log_dir=LOG_DIR, plot_dir=PLOT_DIR)   # ← 키워드 전달
+    )
+print('> 2')
+
+
+class ProgressBarCallback(BaseCallback):
+    def __init__(self, total_timesteps, verbose=0):
+        super().__init__(verbose)
+        from tqdm import tqdm
+        self.pbar = tqdm(total=total_timesteps, desc="Timesteps", unit="ts")
+
+    def _on_step(self):
+        self.pbar.update(1)
+        return True
+
+    def _on_training_end(self):
+        self.pbar.close()
+
+
 class RewardPlotCallback(BaseCallback):
     """
     VecEnv(dummmy)에서 dones/rewards를 읽어 에피소드 리턴을 csv로 저장하고,
@@ -33,14 +78,18 @@ class RewardPlotCallback(BaseCallback):
         self.n_envs = self.training_env.num_envs
         self.ep_returns = np.zeros(self.n_envs, dtype=np.float32)
         self.ep_lengths = np.zeros(self.n_envs, dtype=np.int32)
-        self.total_episodes = 0
+        self.total_episodes = -1 # 이렇게 해야 0부터 시작함
 
         with open(self.csv_path, "w", newline="") as f:
             csv.writer(f).writerow(["episode", "return", "length", "timesteps"])
 
+    
     def _on_step(self) -> bool:
         rewards = self.locals["rewards"]
-        dones = self.locals["dones"]
+        #dones = self.locals["dones"]
+        terminated = self.locals.get("terminated", self.locals.get("dones"))
+        truncated  = self.locals.get("truncated",  [False] * len(terminated))
+        dones = [t or r for t, r in zip(terminated, truncated)]
 
         self.ep_returns += rewards
         self.ep_lengths += 1
@@ -62,6 +111,23 @@ class RewardPlotCallback(BaseCallback):
                     self._plot()
 
         return True
+    '''
+    def _on_step(self):
+        self.returns += self.locals["rewards"]
+        self.lengths += 1
+        for i, done in enumerate(self.locals["dones"]):
+            if done:
+                self.ep_cnt += 1
+                with open(self.csv_path, "a", newline="") as f:
+                    csv.writer(f).writerow(
+                        [self.ep_cnt, float(self.returns[i]), int(self.lengths[i]), self.num_timesteps]
+                    )
+                self.returns[i] = 0.0
+                self.lengths[i] = 0
+                if self.ep_cnt % self.plot_every == 0:
+                    self._plot()
+        return True
+    '''
 
     def _plot(self):
         try:
@@ -87,36 +153,55 @@ class RewardPlotCallback(BaseCallback):
             if self.verbose:
                 print(f"[RewardPlotCallback] plot failed: {e}")
 
+#env_name = 'fly_drone-v0'
+#start_time = datetime.now().replace(microsecond=0)
 
-render = True
-env_name = 'fly_drone-v0'
-start_time = datetime.now().replace(microsecond=0)
+#run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+#log_dir = Path("PPO_trained_model") / env_name / run_id
+#log_dir.mkdir(parents=True, exist_ok=True)
 
-# ==== 로그 디렉토리 (체크포인트/CSV/플롯 저장용) ====
-run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-log_dir = Path("PPO_trained_model") / env_name / run_id
-log_dir.mkdir(parents=True, exist_ok=True)
-
-env = gym.make(env_name)
-env.settings(rend = render, train = True)
+#env = gym.make(env_name)
+env = gym.make(ENV_ID)
+env.settings(rend = True, train = True)
 vec_env = DummyVecEnv([lambda: env])
 vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
-model = PPO("MlpPolicy", vec_env, verbose=1)
+print('> 3')
 
-checkpoint_callback = CheckpointCallback(
-  save_freq=5000,
-  save_path=log_dir,
-  name_prefix=env_name,
+#model = PPO("MlpPolicy", vec_env, verbose=1, tensorboard_log=str(TB_DIR))
+model = PPO(
+    policy="MlpPolicy",
+    env=vec_env,
+    learning_rate=cfg["lr"],
+    n_steps=cfg["n_steps"],
+    gamma=cfg["gamma"],
+    verbose=1,
+    tensorboard_log=str(TB_DIR),
+    device="auto",
+)
+
+checkpoint_cb = CheckpointCallback(
+  save_freq=cfg["checkpoint_freq"],
+  save_path=str(MODEL_DIR),
+  name_prefix="ppo_step",
   save_replay_buffer=True,
   save_vecnormalize=True,
 )
 
-reward_plot_cb = RewardPlotCallback(log_dir, plot_every_episodes=20, verbose=1)
+progress_cb = ProgressBarCallback(cfg["total_timesteps"])
+reward_plot_cb = RewardPlotCallback(PLOT_DIR, plot_every_episodes=20, verbose=1)
 
-model.learn(total_timesteps=50_000, callback=[checkpoint_callback, reward_plot_cb])
+print('> 학습 곧 시작')
+model.learn(total_timesteps=cfg["total_timesteps"], callback=[checkpoint_cb, reward_plot_cb, progress_cb])
+print('> 학습 시작')
+
+model.save(MODEL_DIR / "final_model")
+vec_env.save(MODEL_DIR / "vec_normalize.pkl")
+
+#print(f"✅  Training finished.  All artifacts are in  {SESSION}")
 
 
+'''
 log_dir = "PPO_trained_model"
 if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -124,7 +209,7 @@ log_dir = log_dir + '/' + env_name+ '/'
 if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-model.save(log_dir + "ppo_" + env_name)
+model.save(MODEL_DIR / "final_model")
 stats_path = os.path.join(log_dir, "vec_normalize.pkl")
 vec_env.save(stats_path)
 
@@ -137,4 +222,5 @@ print("Started training at : ", start_time)
 print("Finished training at : ", end_time)
 print("Total training time : ", end_time - start_time)
 print("--------------------------------------------------------------------------------------------")
+'''
 
