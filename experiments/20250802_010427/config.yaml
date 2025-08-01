@@ -1,0 +1,9 @@
+algo: PPO
+env_name: FlyDrone-v0
+total_timesteps: 10000
+log_every_steps: 20
+checkpoint_freq: 10000
+lr: 0.00013296321722176043
+n_steps: 1024
+gamma: 0.9541215081998161
+etc: "\u2026"

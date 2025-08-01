@@ -370,7 +370,11 @@ KST = timezone(timedelta(hours=9))
 
 class Fly_drone(gym.Env):
     MAX_VERTICES = 8
-    def __init__(self, log_dir: Path, plot_dir: Path):
+    # 튜닝값 쓸거임
+    #"w_area": 2.560835061994321,
+    #"w_alt": 1.5048324796298398,
+    #"w_energy": 0.005251185724086418,
+    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 2.560835061994321, w_alt : float = 1.5048324796298398, w_energy: float = 0.005251185724086418, **kwargs):
         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
         self.done = False
@@ -388,6 +392,10 @@ class Fly_drone(gym.Env):
         self.LOG_EVERY_STEPS = 20 # 에피소드 중 특정 스텝마다 로그 
         self._step_idx = 0
         self._log_buf  = []
+        # 하이퍼 파라미터
+        self.w_area   = w_area
+        self.w_alt    = w_alt
+        self.w_energy = w_energy
 
         (self._plot_dir / "maps").mkdir(parents=True, exist_ok=True)
     
@@ -421,6 +429,13 @@ class Fly_drone(gym.Env):
         # Z 속도 제한 (스칼라이므로 clip)
         drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
 
+    def seed(self, seed: int | None = None): 
+        #옵튜나 때문에 만든 함수임
+        from gym.utils import seeding
+        self.np_random, seed = seeding.np_random(seed)
+        # 환경 안에서 np.random 대신 self.np_random 사용 권장
+        return [seed]
+    
     def _build_state(self) -> np.ndarray:
         """
         x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
@@ -504,7 +519,7 @@ class Fly_drone(gym.Env):
                 else:
                     break
         '''
-                # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
         # 4) 시야 레이캐스팅 (벡터화 버전)
         # ------------------------------------------------------------------
         u = np.linspace(-np.tan(FOV_RAD_X / 2), np.tan(FOV_RAD_X / 2), N)
@@ -589,6 +604,7 @@ class Fly_drone(gym.Env):
                 explored_area += area_reward
                 # 이제부터는 invalid 가능성을 낮추기 위해 effective_poly(= 실제로 카운트한 면적)만 저장
                 all_polygons.append(effective_poly)
+        area_reward *= self.w_area
 
 
         # --------- 6) 고도 유지 보상 ---------
@@ -599,6 +615,7 @@ class Fly_drone(gym.Env):
             altitude_reward -= 1000
         elif drone_alt > ground_alt + 20:
             altitude_reward -= 500
+        altitude_reward *= self.w_alt
 
         # --------- 7) 에너지 패널티 계산 ---------
         #   - 여기서 Mx, My를 "원하는 선형가속도"로부터 만들고,
@@ -610,6 +627,7 @@ class Fly_drone(gym.Env):
         penalty_E, omegas, powers, info_E = energy_penalty_from_action(
             acc_world, vel_world, Mx, My, quad_params, dt=DT
         )
+        penalty_E  *= self.w_energy
 
         # 전체 리워드
         reward = area_reward + altitude_reward + penalty_E
@@ -650,7 +668,7 @@ class Fly_drone(gym.Env):
         self.total_return = 0
         self.done = False
         time = 0
-        drone_xy = np.array([264000.0, 309500.0])
+        drone_xy = np.array([264300.0, 309370.0])
         drone_xy_velocity = np.array([0.0, 0.0])
         drone_z_velocity = 0.0
         roll, pitch, yaw, explored_area = 0, 0, 0, 0

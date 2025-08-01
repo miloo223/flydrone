@@ -20,12 +20,15 @@ import yaml
 cfg = dict(
     algo="PPO",
     env_name="FlyDrone-v0",
-    total_timesteps=10_000,#실행시 2_000_000, 테스트시 10_000,
+    total_timesteps=2_000_0000,#실행시 2_000_000, 테스트시 10_000,
     log_every_steps=20,
     checkpoint_freq=10_000,
-    lr=3e-4,
-    n_steps=2048,
-    gamma=0.99,
+    #lr=3e-4,
+    lr=0.00013296321722176043,
+    #n_steps=2048,
+    n_steps=1024,
+    #gamma=0.99,
+    gamma=0.9541215081998161,
     etc="…"
 )
 
@@ -89,13 +92,16 @@ class RewardPlotCallback(BaseCallback):
         #dones = self.locals["dones"]
         terminated = self.locals.get("terminated", self.locals.get("dones"))
         truncated  = self.locals.get("truncated",  [False] * len(terminated))
-        dones = [t or r for t, r in zip(terminated, truncated)]
+        #dones = [t or r for t, r in zip(terminated, truncated)]
 
         self.ep_returns += rewards
+        #raw_rew = self.training_env.get_original_reward()
+        #self.ep_returns += raw_rew
+
         self.ep_lengths += 1
 
-        for i, done in enumerate(dones):
-            if done:
+        for i, (term, trunc) in enumerate(zip(terminated, truncated)):
+            if term:
                 self.total_episodes += 1
                 # CSV 기록
                 with open(self.csv_path, "a", newline="") as f:

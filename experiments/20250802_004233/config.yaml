@@ -1,0 +1,4 @@
+algo: PPO-optuna
+total_timesteps: 2000000
+log_every_steps: 20
+checkpoint_freq: 10000

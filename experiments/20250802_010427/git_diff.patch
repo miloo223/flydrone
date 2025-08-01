@@ -1,0 +1,209 @@
+diff --git a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc
+index 888b7ab..02a7038 100644
+Binary files a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc and b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc differ
+diff --git a/fly_drone/envs/fly_drone_env.py b/fly_drone/envs/fly_drone_env.py
+index bb7251c..039d424 100644
+--- a/fly_drone/envs/fly_drone_env.py
++++ b/fly_drone/envs/fly_drone_env.py
+@@ -370,7 +370,11 @@ KST = timezone(timedelta(hours=9))
+ 
+ class Fly_drone(gym.Env):
+     MAX_VERTICES = 8
+-    def __init__(self, log_dir: Path, plot_dir: Path):
++    # 튜닝값 쓸거임
++    #"w_area": 2.560835061994321,
++    #"w_alt": 1.5048324796298398,
++    #"w_energy": 0.005251185724086418,
++    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 2.560835061994321, w_alt : float = 1.5048324796298398, w_energy: float = 0.005251185724086418, **kwargs):
+         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
+         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
+         self.done = False
+@@ -388,6 +392,10 @@ class Fly_drone(gym.Env):
+         self.LOG_EVERY_STEPS = 20 # 에피소드 중 특정 스텝마다 로그 
+         self._step_idx = 0
+         self._log_buf  = []
++        # 하이퍼 파라미터
++        self.w_area   = w_area
++        self.w_alt    = w_alt
++        self.w_energy = w_energy
+ 
+         (self._plot_dir / "maps").mkdir(parents=True, exist_ok=True)
+     
+@@ -421,6 +429,13 @@ class Fly_drone(gym.Env):
+         # Z 속도 제한 (스칼라이므로 clip)
+         drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
+ 
++    def seed(self, seed: int | None = None): 
++        #옵튜나 때문에 만든 함수임
++        from gym.utils import seeding
++        self.np_random, seed = seeding.np_random(seed)
++        # 환경 안에서 np.random 대신 self.np_random 사용 권장
++        return [seed]
++    
+     def _build_state(self) -> np.ndarray:
+         """
+         x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
+@@ -504,7 +519,7 @@ class Fly_drone(gym.Env):
+                 else:
+                     break
+         '''
+-                # ------------------------------------------------------------------
++        # ------------------------------------------------------------------
+         # 4) 시야 레이캐스팅 (벡터화 버전)
+         # ------------------------------------------------------------------
+         u = np.linspace(-np.tan(FOV_RAD_X / 2), np.tan(FOV_RAD_X / 2), N)
+@@ -589,6 +604,7 @@ class Fly_drone(gym.Env):
+                 explored_area += area_reward
+                 # 이제부터는 invalid 가능성을 낮추기 위해 effective_poly(= 실제로 카운트한 면적)만 저장
+                 all_polygons.append(effective_poly)
++        area_reward *= self.w_area
+ 
+ 
+         # --------- 6) 고도 유지 보상 ---------
+@@ -599,6 +615,7 @@ class Fly_drone(gym.Env):
+             altitude_reward -= 1000
+         elif drone_alt > ground_alt + 20:
+             altitude_reward -= 500
++        altitude_reward *= self.w_alt
+ 
+         # --------- 7) 에너지 패널티 계산 ---------
+         #   - 여기서 Mx, My를 "원하는 선형가속도"로부터 만들고,
+@@ -610,6 +627,7 @@ class Fly_drone(gym.Env):
+         penalty_E, omegas, powers, info_E = energy_penalty_from_action(
+             acc_world, vel_world, Mx, My, quad_params, dt=DT
+         )
++        penalty_E  *= self.w_energy
+ 
+         # 전체 리워드
+         reward = area_reward + altitude_reward + penalty_E
+@@ -650,23 +668,77 @@ class Fly_drone(gym.Env):
+         self.total_return = 0
+         self.done = False
+         time = 0
+-        drone_xy = np.array([264000.0, 309500.0])
+         drone_xy_velocity = np.array([0.0, 0.0])
+         drone_z_velocity = 0.0
+         roll, pitch, yaw, explored_area = 0, 0, 0, 0
+         dem_minx, dem_miny, dem_maxx, dem_maxy = bounds
+ 
++        # ---- Create a random *valid* target area with fixed number of vertices ----
++        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
++        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
++
++        margin = 100       # 경계에서 100 m 이상 띄우기
++        jitter = 30 
++
++        cx = (bounds.left + bounds.right) / 2
++        cy = (bounds.bottom + bounds.top) / 2
++
++        margin = 100       # 경계에서 100 m 이상 띄우기
++        jitter = 30        # 중앙 ±30 m 안에서 무작위
++
++        drone_xy = np.array([
++            np.clip(cx + np.random.uniform(-jitter, jitter),
++                    bounds.left + margin, bounds.right - margin),
++            np.clip(cy + np.random.uniform(-jitter, jitter),
++                    bounds.bottom + margin, bounds.top   - margin)
++        ], dtype=np.float32)
++
++        # 높이
++        px, py = world_to_pixel(drone_xy[0], drone_xy[1])
++        ground_alt = dem[py, px]
++        drone_alt  = float(ground_alt + 10)
++
++        drone_path.append((drone_xy[0], drone_xy[1]))
++
++        # ── 2. 타깃 폴리곤 (시작점 주변 60~120 m) ─────────────
++        center_x = np.clip(drone_xy[0] + np.random.uniform(-80, 80),
++                        bounds.left + margin, bounds.right - margin)
++        center_y = np.clip(drone_xy[1] + np.random.uniform(-80, 80),
++                        bounds.bottom + margin, bounds.top  - margin)
++
++        radius = np.random.uniform(60, 120)   # 조금 더 작은 반경
++        angles = np.sort(np.random.uniform(0, 2*np.pi, self.MAX_VERTICES))
++        points = [(center_x + radius*np.cos(a),
++                center_y + radius*np.sin(a)) for a in angles]
++
++        raw_target = Polygon(points)
++        self.target_area = force_vertex_count(
++            fix_polygon(raw_target).buffer(self.POLY_ENLARGE),
++            self.MAX_VERTICES
++        )
++
++        # ── 3. 상태 벡터 ─────────────────────────────────────
++        obs = np.array([
++            *drone_xy,                              # 2
++            *drone_xy_velocity,                     # 2
++            roll, pitch, yaw,                       # 3
++            drone_z_velocity, explored_area,        # 2
++            drone_alt,                              # 1
++            *as_fixed_length_coords(self.target_area,
++                                    self.MAX_VERTICES).flatten()  # 18
++        ], dtype=np.float32)
++
++        return obs
++        '''
+         drone_path = []
+         drone_path.append((drone_xy[0], drone_xy[1]))
+         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+         ground_alt = dem[py[0], px[0]]
+         drone_alt = ground_alt + 10 #리셋 높이
+-
+-        # ---- Create a random *valid* target area with fixed number of vertices ----
+-        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
+-        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
++        
+ 
+ 
++        
+         num_points = self.MAX_VERTICES
+         # “조금 더 큰 범위” -> 반지름 범위를 키움
+         radius = np.random.uniform(100, 200)
+@@ -694,6 +766,7 @@ class Fly_drone(gym.Env):
+         state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
+ 
+         return state
++        '''
+     
+     def _check_done(self, ground_alt):
+         # 1. Time limit
+diff --git a/train.py b/train.py
+index 5591359..ce44158 100644
+--- a/train.py
++++ b/train.py
+@@ -23,9 +23,12 @@ cfg = dict(
+     total_timesteps=10_000,#실행시 2_000_000, 테스트시 10_000,
+     log_every_steps=20,
+     checkpoint_freq=10_000,
+-    lr=3e-4,
+-    n_steps=2048,
+-    gamma=0.99,
++    #lr=3e-4,
++    lr=0.00013296321722176043,
++    #n_steps=2048,
++    n_steps=1024,
++    #gamma=0.99,
++    gamma=0.9541215081998161,
+     etc="…"
+ )
+ 
+@@ -89,13 +92,16 @@ class RewardPlotCallback(BaseCallback):
+         #dones = self.locals["dones"]
+         terminated = self.locals.get("terminated", self.locals.get("dones"))
+         truncated  = self.locals.get("truncated",  [False] * len(terminated))
+-        dones = [t or r for t, r in zip(terminated, truncated)]
++        #dones = [t or r for t, r in zip(terminated, truncated)]
+ 
+         self.ep_returns += rewards
++        #raw_rew = self.training_env.get_original_reward()
++        #self.ep_returns += raw_rew
++
+         self.ep_lengths += 1
+ 
+-        for i, done in enumerate(dones):
+-            if done:
++        for i, (term, trunc) in enumerate(zip(terminated, truncated)):
++            if term:
+                 self.total_episodes += 1
+                 # CSV 기록
+                 with open(self.csv_path, "a", newline="") as f:
