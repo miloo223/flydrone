@@ -183,7 +183,7 @@ model = PPO(
     gamma=cfg["gamma"],
     verbose=1,
     tensorboard_log=str(TB_DIR),
-    device="auto",
+    device="cpu",
 )
 
 checkpoint_cb = CheckpointCallback(

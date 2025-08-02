@@ -1,0 +1,42 @@
+diff --git a/.vscode/launch.json b/.vscode/launch.json
+deleted file mode 100644
+index 8d025cf..0000000
+--- a/.vscode/launch.json
++++ /dev/null
+@@ -1,22 +0,0 @@
+-{
+-    // Use IntelliSense to learn about possible attributes.
+-    // Hover to view descriptions of existing attributes.
+-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+-    "version": "0.2.0",
+-    "configurations": [
+-        {
+-            "name": "Download and Run current file",
+-            "type": "ev3devBrowser",
+-            "request": "launch",
+-            "program": "/home/robot/${workspaceFolderBasename}/${relativeFile}",
+-            "interactiveTerminal": true
+-        },
+-        {
+-            "name": "Download and Run my-program",
+-            "type": "ev3devBrowser",
+-            "request": "launch",
+-            "program": "/home/robot/${workspaceFolderBasename}/my-program (replace 'my-program' with the actual path)",
+-            "interactiveTerminal": true
+-        }
+-    ]
+-}
+\ No newline at end of file
+diff --git a/train.py b/train.py
+index e2e4a88..d5e0df0 100644
+--- a/train.py
++++ b/train.py
+@@ -183,7 +183,7 @@ model = PPO(
+     gamma=cfg["gamma"],
+     verbose=1,
+     tensorboard_log=str(TB_DIR),
+-    device="auto",
++    device="cpu",
+ )
+ 
+ checkpoint_cb = CheckpointCallback(

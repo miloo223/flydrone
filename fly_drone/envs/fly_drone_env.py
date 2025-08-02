@@ -14,7 +14,7 @@ import numpy as np
 from dataclasses import dataclass
 from shapely.validation import make_valid
 from shapely.errors import GEOSException
-
+from typing import Optional
 
 env_name = "fly_drone-v0"
 
@@ -429,7 +429,7 @@ class Fly_drone(gym.Env):
         # Z 속도 제한 (스칼라이므로 clip)
         drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
 
-    def seed(self, seed: int | None = None): 
+    def seed(self, seed: Optional[int] = None): 
         #옵튜나 때문에 만든 함수임
         from gym.utils import seeding
         self.np_random, seed = seeding.np_random(seed)

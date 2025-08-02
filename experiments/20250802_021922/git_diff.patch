@@ -1,0 +1,73 @@
+diff --git a/.vscode/launch.json b/.vscode/launch.json
+deleted file mode 100644
+index 8d025cf..0000000
+--- a/.vscode/launch.json
++++ /dev/null
+@@ -1,22 +0,0 @@
+-{
+-    // Use IntelliSense to learn about possible attributes.
+-    // Hover to view descriptions of existing attributes.
+-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+-    "version": "0.2.0",
+-    "configurations": [
+-        {
+-            "name": "Download and Run current file",
+-            "type": "ev3devBrowser",
+-            "request": "launch",
+-            "program": "/home/robot/${workspaceFolderBasename}/${relativeFile}",
+-            "interactiveTerminal": true
+-        },
+-        {
+-            "name": "Download and Run my-program",
+-            "type": "ev3devBrowser",
+-            "request": "launch",
+-            "program": "/home/robot/${workspaceFolderBasename}/my-program (replace 'my-program' with the actual path)",
+-            "interactiveTerminal": true
+-        }
+-    ]
+-}
+\ No newline at end of file
+diff --git a/fly_drone/__pycache__/__init__.cpython-39.pyc b/fly_drone/__pycache__/__init__.cpython-39.pyc
+index 440b16e..dd92727 100644
+Binary files a/fly_drone/__pycache__/__init__.cpython-39.pyc and b/fly_drone/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/fly_drone/envs/__pycache__/__init__.cpython-39.pyc b/fly_drone/envs/__pycache__/__init__.cpython-39.pyc
+index b79ab5e..8e5b569 100644
+Binary files a/fly_drone/envs/__pycache__/__init__.cpython-39.pyc and b/fly_drone/envs/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/fly_drone/envs/__pycache__/fly_drone_env.cpython-39.pyc b/fly_drone/envs/__pycache__/fly_drone_env.cpython-39.pyc
+index 1d9031a..2991c43 100644
+Binary files a/fly_drone/envs/__pycache__/fly_drone_env.cpython-39.pyc and b/fly_drone/envs/__pycache__/fly_drone_env.cpython-39.pyc differ
+diff --git a/fly_drone/envs/fly_drone_env.py b/fly_drone/envs/fly_drone_env.py
+index 21eec18..65af3c0 100644
+--- a/fly_drone/envs/fly_drone_env.py
++++ b/fly_drone/envs/fly_drone_env.py
+@@ -14,7 +14,7 @@ import numpy as np
+ from dataclasses import dataclass
+ from shapely.validation import make_valid
+ from shapely.errors import GEOSException
+-
++from typing import Optional
+ 
+ env_name = "fly_drone-v0"
+ 
+@@ -429,7 +429,7 @@ class Fly_drone(gym.Env):
+         # Z 속도 제한 (스칼라이므로 clip)
+         drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
+ 
+-    def seed(self, seed: int | None = None): 
++    def seed(self, seed: Optional[int] = None): 
+         #옵튜나 때문에 만든 함수임
+         from gym.utils import seeding
+         self.np_random, seed = seeding.np_random(seed)
+diff --git a/train.py b/train.py
+index e2e4a88..d5e0df0 100644
+--- a/train.py
++++ b/train.py
+@@ -183,7 +183,7 @@ model = PPO(
+     gamma=cfg["gamma"],
+     verbose=1,
+     tensorboard_log=str(TB_DIR),
+-    device="auto",
++    device="cpu",
+ )
+ 
+ checkpoint_cb = CheckpointCallback(
