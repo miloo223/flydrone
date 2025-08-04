@@ -1,0 +1,136 @@
+diff --git a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc
+index 4fe2149..9ac2627 100644
+Binary files a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc and b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc differ
+diff --git a/fly_drone/envs/fly_drone_env.py b/fly_drone/envs/fly_drone_env.py
+index 4969d1c..46fa1fc 100644
+--- a/fly_drone/envs/fly_drone_env.py
++++ b/fly_drone/envs/fly_drone_env.py
+@@ -374,16 +374,16 @@ class Fly_drone(gym.Env):
+     #"w_area": 2.560835061994321,
+     #"w_alt": 1.5048324796298398,
+     #"w_energy": 0.005251185724086418,
+-    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.1, w_alt : float = 0.05, w_energy: float = 1e-4, **kwargs):
++    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.01, w_alt : float = 0.2, w_energy: float = 0.005, **kwargs):
+         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
+-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
++        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + 1,), dtype="float32") #set observation space size, range
+         self.done = False
+         self.episode = 0
+         self.train = True
+         self.rend = True
+         self.total_return = 0
+         self.score_avg = 0
+-        self.target_area = None
++        #self.target_area = None
+         self.POLY_ENLARGE = 3.0
+         self.max_xy_speed = 8.0   # 수평(xy) 최대 속도 [m/s]
+         self.max_z_speed = 5.0     # 수직(z) 최대 속도 [m/s]
+@@ -451,8 +451,8 @@ class Fly_drone(gym.Env):
+             explored_area
+         ]
+             # 2) 타깃 폴리곤 꼭짓점
+-        verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
+-        state.extend(verts.flatten().tolist())
++        #verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
++        #state.extend(verts.flatten().tolist())
+ 
+         return np.array(state, dtype=np.float32)
+     
+@@ -567,8 +567,7 @@ class Fly_drone(gym.Env):
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-        target_vertices = np.array(self.target_area.exterior.coords)
+-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
++        state = state1 + state2 + state3 + [drone_alt]
+ 
+ 
+         # --------- 5) 면적 보상 (patched & robust) ---------
+@@ -583,6 +582,7 @@ class Fly_drone(gym.Env):
+                 self.MAX_VERTICES
+             )
+ 
++            '''
+             # 3) target_area와 교차하는 부분만 계산
+             if  self.target_area is not None:
+                 try:
+@@ -594,7 +594,8 @@ class Fly_drone(gym.Env):
+                         fix_polygon(self.target_area.buffer(0))
+                     )
+                     effective_poly = fix_polygon(effective_poly)
+-
++            '''
++            effective_poly = fix_polygon(hull_fixed)
+             if not effective_poly.is_empty:
+                 if all_polygons:
+                     total_area_poly = unary_union(all_polygons)
+@@ -698,6 +699,7 @@ class Fly_drone(gym.Env):
+         self.idle_counter = 0
+         self.done = False
+         time = 0
++        self._prev_area = 0.0
+         drone_xy = np.array([264300.0, 309370.0])
+         drone_xy_velocity = np.array([0.0, 0.0])
+         drone_z_velocity = 0.0
+@@ -711,14 +713,13 @@ class Fly_drone(gym.Env):
+         drone_alt = ground_alt + 10 #리셋 높이
+ 
+         # ---- Create a random *valid* target area with fixed number of vertices ----
+-        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
+-        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
++        #center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
++        #center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
+ 
+ 
+-        num_points = self.MAX_VERTICES
+-        # “조금 더 큰 범위” -> 반지름 범위를 키움
+-        radius = np.random.uniform(100, 200)
+-
++        #num_points = self.MAX_VERTICES
++        #radius = np.random.uniform(100, 200)
++        '''
+         angles = np.sort(np.random.uniform(0, 2 * np.pi, num_points))
+         points = []
+         for angle in angles:
+@@ -732,14 +733,12 @@ class Fly_drone(gym.Env):
+             fix_polygon(raw_target).buffer(self.POLY_ENLARGE),
+             self.MAX_VERTICES
+         )
+-
++        '''
+ 
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-
+-        target_vertices = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)
+-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
++        state = state1 + state2 + state3 + [drone_alt]
+ 
+         return state
+     
+@@ -766,11 +765,6 @@ class Fly_drone(gym.Env):
+             fig, ax = plt.subplots(figsize=(16, 12), dpi=400)
+             ax.imshow(dem, cmap='terrain', extent=(bounds.left, bounds.right, bounds.bottom, bounds.top), interpolation='none')
+ 
+-            # Plot the target area
+-            if self.target_area:
+-                x, y = self.target_area.exterior.xy
+-                ax.plot(x, y, 'y--', linewidth=2, label='Target Area')
+-
+             if all_polygons:
+                 total_poly = unary_union(all_polygons)
+                 if total_poly.geom_type == 'Polygon':
+diff --git a/train.py b/train.py
+index d11ee74..6736132 100644
+--- a/train.py
++++ b/train.py
+@@ -4,7 +4,7 @@ from datetime import datetime
+ from stable_baselines3 import PPO
+ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, ProgressBarCallback
+-from fly_drone.envs import fly_drone_env
++from fly_drone.envs import fly_drone_env_og_ver
+ import torch
+ import csv
+ import numpy as np

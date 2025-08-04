@@ -4,7 +4,7 @@ from datetime import datetime
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, ProgressBarCallback
-from fly_drone.envs import fly_drone_env
+from fly_drone.envs import fly_drone_env_og_ver
 import torch
 import csv
 import numpy as np

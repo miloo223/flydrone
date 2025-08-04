@@ -1,0 +1,352 @@
+diff --git a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc
+index 4fe2149..32f2185 100644
+Binary files a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc and b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc differ
+diff --git a/fly_drone/envs/fly_drone_env.py b/fly_drone/envs/fly_drone_env.py
+index 4969d1c..1d3bcc2 100644
+--- a/fly_drone/envs/fly_drone_env.py
++++ b/fly_drone/envs/fly_drone_env.py
+@@ -374,16 +374,16 @@ class Fly_drone(gym.Env):
+     #"w_area": 2.560835061994321,
+     #"w_alt": 1.5048324796298398,
+     #"w_energy": 0.005251185724086418,
+-    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.1, w_alt : float = 0.05, w_energy: float = 1e-4, **kwargs):
++    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.02, w_alt : float = 0.5, w_energy: float = 0.005, **kwargs):
+         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
+-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
++        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9+1+1,), dtype="float32") #set observation space size, range
+         self.done = False
+         self.episode = 0
+         self.train = True
+         self.rend = True
+         self.total_return = 0
+         self.score_avg = 0
+-        self.target_area = None
++        #self.target_area = None
+         self.POLY_ENLARGE = 3.0
+         self.max_xy_speed = 8.0   # 수평(xy) 최대 속도 [m/s]
+         self.max_z_speed = 5.0     # 수직(z) 최대 속도 [m/s]
+@@ -443,16 +443,27 @@ class Fly_drone(gym.Env):
+         x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
+         target_area 폴리곤 꼭짓점들을 모두 합쳐서 반환합니다.
+         """
++        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
++
++        if not (0 <= px < width and 0 <= py < height):
++            # out of bounds -> 끝내고 큰 페널티
++            ground_alt = -1e6
++        else:
++            ground_alt = dem[py[0], px[0]]
++        alt_error  = drone_alt - (ground_alt + 10.0)    
+         # 1) 위치·속도·자세·면적
+         state = [
+             drone_xy[0], drone_xy[1], drone_alt,
+             drone_xy_velocity[0], drone_xy_velocity[1], drone_z_velocity,
+             roll, pitch, yaw,
+-            explored_area
++            explored_area,
++            alt_error
+         ]
++        #ground = dem(self.pos[0], self.pos[1])
++        #alt_error = drone_alt - (ground + 10.0)
+             # 2) 타깃 폴리곤 꼭짓점
+-        verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
+-        state.extend(verts.flatten().tolist())
++        #verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
++        #state.extend(verts.flatten().tolist())
+ 
+         return np.array(state, dtype=np.float32)
+     
+@@ -492,6 +503,7 @@ class Fly_drone(gym.Env):
+             return self._build_state(), reward, self.done, {}
+     
+         ground_alt = dem[py, px]
++        alt_error  = drone_alt - (ground_alt + 10.0)
+ 
+         '''
+         # --------- 4) 시야 레이캐스팅 (기존) ---------
+@@ -567,8 +579,7 @@ class Fly_drone(gym.Env):
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-        target_vertices = np.array(self.target_area.exterior.coords)
+-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
++        state = state1 + [drone_alt]+ state2 + state3 + [alt_error]
+ 
+ 
+         # --------- 5) 면적 보상 (patched & robust) ---------
+@@ -583,6 +594,7 @@ class Fly_drone(gym.Env):
+                 self.MAX_VERTICES
+             )
+ 
++            '''
+             # 3) target_area와 교차하는 부분만 계산
+             if  self.target_area is not None:
+                 try:
+@@ -594,7 +606,8 @@ class Fly_drone(gym.Env):
+                         fix_polygon(self.target_area.buffer(0))
+                     )
+                     effective_poly = fix_polygon(effective_poly)
+-
++            '''
++            effective_poly = fix_polygon(hull_fixed)
+             if not effective_poly.is_empty:
+                 if all_polygons:
+                     total_area_poly = unary_union(all_polygons)
+@@ -617,9 +630,12 @@ class Fly_drone(gym.Env):
+         # --------- 6) 고도 유지 보상 ---------
+         target_altitude = ground_alt + 10
+         altitude_error = abs(drone_alt - target_altitude)
+-        altitude_reward = -0.02 * altitude_error
+-        if drone_alt < ground_alt:
+-            altitude_reward -= 1000
++        #altitude_reward = -0.02 * altitude_error
++        #if drone_alt < ground_alt:
++        #    altitude_reward -= 1000
++        alt_diff = max(0.0, drone_alt - (ground_alt + 10.0))
++        #altitude_reward = -0.05 * (alt_diff ** 2)            
++        altitude_reward = -np.exp((alt_diff - 10) * 0.05) + 1
+         altitude_reward *= self.w_alt
+ 
+         # --------- 7) 에너지 패널티 계산 ---------
+@@ -677,13 +693,17 @@ class Fly_drone(gym.Env):
+         if self._step_idx % 100 == 0:
+             delta_area = explored_area - getattr(self, "_prev_area", 0)
+             self._prev_area = explored_area
++            v_xy = np.linalg.norm(drone_xy_velocity)
+             print(f"[{self.episode:04d}|{self._step_idx:05d}]"
+                 f" Δarea={delta_area:6.1f}  explored={explored_area:8.1f}"
+                 f" | r_area={area_reward:+6.2f}"
+                 f" r_alt={altitude_reward:+6.2f}"
+                 f" r_E={penalty_E:+6.2f}"
+                 f" | z={drone_alt:7.1f}"
+-                f" err={altitude_error:5.1f}")
++                f" err={altitude_error:5.1f}"
++                f" | v_xy={v_xy:.2f} m/s   v_z={drone_z_velocity:.2f} m/s"
++                )
++                
+ 
+         # ---------------------------------------------------------
+ 
+@@ -698,6 +718,7 @@ class Fly_drone(gym.Env):
+         self.idle_counter = 0
+         self.done = False
+         time = 0
++        self._prev_area = 0.0
+         drone_xy = np.array([264300.0, 309370.0])
+         drone_xy_velocity = np.array([0.0, 0.0])
+         drone_z_velocity = 0.0
+@@ -709,16 +730,17 @@ class Fly_drone(gym.Env):
+         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+         ground_alt = dem[py[0], px[0]]
+         drone_alt = ground_alt + 10 #리셋 높이
++        alt_error  = drone_alt - (ground_alt + 10.0)
+ 
+-        # ---- Create a random *valid* target area with fixed number of vertices ----
+-        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
+-        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
+ 
++        # ---- Create a random *valid* target area with fixed number of vertices ----
++        #center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
++        #center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
+ 
+-        num_points = self.MAX_VERTICES
+-        # “조금 더 큰 범위” -> 반지름 범위를 키움
+-        radius = np.random.uniform(100, 200)
+ 
++        #num_points = self.MAX_VERTICES
++        #radius = np.random.uniform(100, 200)
++        '''
+         angles = np.sort(np.random.uniform(0, 2 * np.pi, num_points))
+         points = []
+         for angle in angles:
+@@ -732,20 +754,18 @@ class Fly_drone(gym.Env):
+             fix_polygon(raw_target).buffer(self.POLY_ENLARGE),
+             self.MAX_VERTICES
+         )
+-
++        '''
+ 
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-
+-        target_vertices = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)
+-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
++        state = state1 + [drone_alt] + state2 + state3 + [alt_error]
+ 
+         return state
+     
+     def _check_done(self, ground_alt):
+         # 1. Time limit
+-        if time >= 600:
++        if time >= 2000:
+             self.done = True
+ 
+         # 2. Collision with ground
+@@ -766,11 +786,6 @@ class Fly_drone(gym.Env):
+             fig, ax = plt.subplots(figsize=(16, 12), dpi=400)
+             ax.imshow(dem, cmap='terrain', extent=(bounds.left, bounds.right, bounds.bottom, bounds.top), interpolation='none')
+ 
+-            # Plot the target area
+-            if self.target_area:
+-                x, y = self.target_area.exterior.xy
+-                ax.plot(x, y, 'y--', linewidth=2, label='Target Area')
+-
+             if all_polygons:
+                 total_poly = unary_union(all_polygons)
+                 if total_poly.geom_type == 'Polygon':
+diff --git a/train copy.py b/train copy.py
+deleted file mode 100644
+index a2cae8d..0000000
+--- a/train copy.py	
++++ /dev/null
+@@ -1,136 +0,0 @@
+-#!/usr/bin/env python3
+-# train_optuna.py  ─ Optuna 최적값으로 학습 & 모든 콜백 포함
+-# ----------------------------------------------------------
+-import json, csv, gym, yaml, os
+-from pathlib import Path
+-from datetime import datetime
+-
+-from stable_baselines3 import PPO
+-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+-from stable_baselines3.common.callbacks import (
+-    BaseCallback, CheckpointCallback, ProgressBarCallback
+-)
+-
+-from run_manager import create_session   # ← 기존 세션 관리자
+-
+-# ──────────────────────────────────────────────────────────
+-# 1. Optuna 결과 로드 (없으면 기본값으로 대체)
+-# ──────────────────────────────────────────────────────────
+-best_path = Path("best_reward_weights.json")
+-if best_path.exists():
+-    best = json.load(best_path.open())
+-    print("✅  Optuna best 파라미터 로드:", best_path)
+-else:
+-    print("⚠️  best_reward_weights.json 을 찾지 못했습니다. 기본값으로 학습합니다.")
+-    best = dict(
+-        w_area=1.0, w_alt=1.0, w_energy=1.0,
+-        lr=3e-4, gamma=0.99, n_steps=2048,
+-    )
+-
+-# 환경 kwargs + PPO kwargs 로 분리
+-ENV_KWARGS  = {k: best[k] for k in ("w_area", "w_alt", "w_energy")}
+-PPO_KWARGS  = {k: best[k] for k in ("lr", "gamma", "n_steps")}
+-PPO_KWARGS["learning_rate"] = PPO_KWARGS.pop("lr")
+-PPO_KWARGS["verbose"]       = 1
+-
+-# ──────────────────────────────────────────────────────────
+-# 2. 세션 디렉터리 생성
+-# ──────────────────────────────────────────────────────────
+-cfg = dict(
+-    algo="PPO-optuna",
+-    total_timesteps=2_000_000,
+-    log_every_steps=20,
+-    checkpoint_freq=10_000,
+-)
+-SESSION = create_session(cfg)
+-LOG_DIR   = SESSION / "logs"
+-PLOT_DIR  = SESSION / "plots"
+-MODEL_DIR = SESSION / "models"
+-TB_DIR    = SESSION / "tensorboard"
+-
+-# ──────────────────────────────────────────────────────────
+-# 3. RewardPlotCallback  (원본 보상*만* 기록)
+-# ──────────────────────────────────────────────────────────
+-class RewardPlotCallback(BaseCallback):
+-    def __init__(self, log_dir: Path, plot_every_episodes: int = 20, verbose: int = 0):
+-        super().__init__(verbose)
+-        self.log_dir   = Path(log_dir)
+-        self.csv_path  = self.log_dir / "episode_returns.csv"
+-        self.plot_path = self.log_dir / "reward_plot.png"
+-        self.plot_every = plot_every_episodes
+-
+-    def _on_training_start(self):
+-        self.n_envs = self.training_env.num_envs
+-        self.ep_returns = [0.0] * self.n_envs
+-        self.ep_lengths = [0]   * self.n_envs
+-        self.total_episodes = 0
+-        self.log_dir.mkdir(parents=True, exist_ok=True)
+-        with open(self.csv_path, "w", newline="") as f:
+-            csv.writer(f).writerow(["episode", "return", "length", "timesteps"])
+-
+-    def _on_step(self):
+-        rewards = self.locals["rewards"]      # 정규화 보상
+-        raw     = self.training_env.get_original_reward(rewards)
+-        term    = self.locals.get("terminated", self.locals.get("dones"))
+-        trunc   = self.locals.get("truncated",  [False]*len(term))
+-
+-        for i in range(self.n_envs):
+-            self.ep_returns[i] += raw[i]
+-            self.ep_lengths[i] += 1
+-            if term[i]:                         # truncated 는 무시
+-                self.total_episodes += 1
+-                with open(self.csv_path, "a", newline="") as f:
+-                    csv.writer(f).writerow(
+-                        [self.total_episodes,
+-                         float(self.ep_returns[i]),
+-                         int(self.ep_lengths[i]),
+-                         self.num_timesteps]
+-                    )
+-                self.ep_returns[i] = 0.0
+-                self.ep_lengths[i] = 0
+-
+-        return True
+-
+-# ──────────────────────────────────────────────────────────
+-# 4. Gym 환경 등록 (딱 한 번)
+-# ──────────────────────────────────────────────────────────
+-ENV_ID = "FlyDrone-v0-custom"
+-if ENV_ID not in gym.envs.registry:
+-    gym.register(
+-        id=ENV_ID,
+-        entry_point="fly_drone.envs.fly_drone_env:Fly_drone",
+-        kwargs={**ENV_KWARGS, "log_dir": LOG_DIR, "plot_dir": PLOT_DIR},
+-    )
+-
+-def make_env():
+-    env = gym.make(ENV_ID)
+-    env.settings(rend=False, train=True)
+-    return env
+-
+-vec_env = DummyVecEnv([make_env])
+-vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True)
+-
+-# ──────────────────────────────────────────────────────────
+-# 5. 모델 생성 & 콜백
+-# ──────────────────────────────────────────────────────────
+-model = PPO("MlpPolicy", vec_env,
+-            tensorboard_log=str(TB_DIR),
+-            **PPO_KWARGS)
+-
+-checkpoint_cb = CheckpointCallback(save_freq=cfg["checkpoint_freq"],
+-                                   save_path=MODEL_DIR,
+-                                   name_prefix="ckpt",
+-                                   save_replay_buffer=False,
+-                                   save_vecnormalize=True)
+-rewardplot_cb = RewardPlotCallback(PLOT_DIR, plot_every_episodes=20)
+-progress_cb   = ProgressBarCallback()
+-
+-# ──────────────────────────────────────────────────────────
+-# 6. 학습
+-# ──────────────────────────────────────────────────────────
+-model.learn(total_timesteps=cfg["total_timesteps"],
+-            callback=[checkpoint_cb, rewardplot_cb, progress_cb])
+-
+-model.save(MODEL_DIR / "final_model")
+-vec_env.save(MODEL_DIR / "vec_normalize.pkl")
+-print("🏁  Training finished:", SESSION)
+diff --git a/train.py b/train.py
+index d11ee74..6736132 100644
+--- a/train.py
++++ b/train.py
+@@ -4,7 +4,7 @@ from datetime import datetime
+ from stable_baselines3 import PPO
+ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, ProgressBarCallback
+-from fly_drone.envs import fly_drone_env
++from fly_drone.envs import fly_drone_env_og_ver
+ import torch
+ import csv
+ import numpy as np

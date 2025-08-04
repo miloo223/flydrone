@@ -374,16 +374,16 @@ class Fly_drone(gym.Env):
     #"w_area": 2.560835061994321,
     #"w_alt": 1.5048324796298398,
     #"w_energy": 0.005251185724086418,
-    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.1, w_alt : float = 0.05, w_energy: float = 1e-4, **kwargs):
+    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.02, w_alt : float = 0.5, w_energy: float = 0.1, **kwargs):
         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9+1+1,), dtype="float32") #set observation space size, range
         self.done = False
         self.episode = 0
         self.train = True
         self.rend = True
         self.total_return = 0
         self.score_avg = 0
-        self.target_area = None
+        #self.target_area = None
         self.POLY_ENLARGE = 3.0
         self.max_xy_speed = 8.0   # 수평(xy) 최대 속도 [m/s]
         self.max_z_speed = 5.0     # 수직(z) 최대 속도 [m/s]
@@ -443,16 +443,27 @@ class Fly_drone(gym.Env):
         x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
         target_area 폴리곤 꼭짓점들을 모두 합쳐서 반환합니다.
         """
+        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+
+        if not (0 <= px < width and 0 <= py < height):
+            # out of bounds -> 끝내고 큰 페널티
+            ground_alt = -1e6
+        else:
+            ground_alt = dem[py[0], px[0]]
+        alt_error  = drone_alt - (ground_alt + 10.0)    
         # 1) 위치·속도·자세·면적
         state = [
             drone_xy[0], drone_xy[1], drone_alt,
             drone_xy_velocity[0], drone_xy_velocity[1], drone_z_velocity,
             roll, pitch, yaw,
-            explored_area
+            explored_area,
+            alt_error
         ]
+        #ground = dem(self.pos[0], self.pos[1])
+        #alt_error = drone_alt - (ground + 10.0)
             # 2) 타깃 폴리곤 꼭짓점
-        verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
-        state.extend(verts.flatten().tolist())
+        #verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
+        #state.extend(verts.flatten().tolist())
 
         return np.array(state, dtype=np.float32)
     
@@ -492,6 +503,7 @@ class Fly_drone(gym.Env):
             return self._build_state(), reward, self.done, {}
     
         ground_alt = dem[py, px]
+        alt_error  = drone_alt - (ground_alt + 10.0)
 
         '''
         # --------- 4) 시야 레이캐스팅 (기존) ---------
@@ -567,8 +579,7 @@ class Fly_drone(gym.Env):
         state1 = [drone_xy[i] for i in range(2)]
         state2 = [drone_xy_velocity[i] for i in range(2)]
         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
-        target_vertices = np.array(self.target_area.exterior.coords)
-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
+        state = state1 + [drone_alt]+ state2 + state3 + [alt_error]
 
 
         # --------- 5) 면적 보상 (patched & robust) ---------
@@ -583,6 +594,7 @@ class Fly_drone(gym.Env):
                 self.MAX_VERTICES
             )
 
+            '''
             # 3) target_area와 교차하는 부분만 계산
             if  self.target_area is not None:
                 try:
@@ -594,7 +606,8 @@ class Fly_drone(gym.Env):
                         fix_polygon(self.target_area.buffer(0))
                     )
                     effective_poly = fix_polygon(effective_poly)
-
+            '''
+            effective_poly = fix_polygon(hull_fixed)
             if not effective_poly.is_empty:
                 if all_polygons:
                     total_area_poly = unary_union(all_polygons)
@@ -617,9 +630,12 @@ class Fly_drone(gym.Env):
         # --------- 6) 고도 유지 보상 ---------
         target_altitude = ground_alt + 10
         altitude_error = abs(drone_alt - target_altitude)
-        altitude_reward = -0.02 * altitude_error
-        if drone_alt < ground_alt:
-            altitude_reward -= 1000
+        #altitude_reward = -0.02 * altitude_error
+        #if drone_alt < ground_alt:
+        #    altitude_reward -= 1000
+        alt_diff = abs(drone_alt - (ground_alt + 10.0)) #타겟과의 거리
+        #altitude_reward = -0.05 * (alt_diff ** 2)            
+        altitude_reward = -max(0.0, np.exp(alt_diff* 0.05))
         altitude_reward *= self.w_alt
 
         # --------- 7) 에너지 패널티 계산 ---------
@@ -677,13 +693,17 @@ class Fly_drone(gym.Env):
         if self._step_idx % 100 == 0:
             delta_area = explored_area - getattr(self, "_prev_area", 0)
             self._prev_area = explored_area
+            v_xy = np.linalg.norm(drone_xy_velocity)
             print(f"[{self.episode:04d}|{self._step_idx:05d}]"
                 f" Δarea={delta_area:6.1f}  explored={explored_area:8.1f}"
                 f" | r_area={area_reward:+6.2f}"
                 f" r_alt={altitude_reward:+6.2f}"
                 f" r_E={penalty_E:+6.2f}"
                 f" | z={drone_alt:7.1f}"
-                f" err={altitude_error:5.1f}")
+                f" err={altitude_error:5.1f}"
+                f" | v_xy={v_xy:.2f} m/s   v_z={drone_z_velocity:.2f} m/s"
+                )
+                
 
         # ---------------------------------------------------------
 
@@ -698,6 +718,7 @@ class Fly_drone(gym.Env):
         self.idle_counter = 0
         self.done = False
         time = 0
+        self._prev_area = 0.0
         drone_xy = np.array([264300.0, 309370.0])
         drone_xy_velocity = np.array([0.0, 0.0])
         drone_z_velocity = 0.0
@@ -709,16 +730,17 @@ class Fly_drone(gym.Env):
         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
         ground_alt = dem[py[0], px[0]]
         drone_alt = ground_alt + 10 #리셋 높이
+        alt_error  = drone_alt - (ground_alt + 10.0)
+
 
         # ---- Create a random *valid* target area with fixed number of vertices ----
-        center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
-        center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
+        #center_x = np.clip(drone_xy[0] + np.random.uniform(-150, 150), dem_minx + 100, dem_maxx - 100)
+        #center_y = np.clip(drone_xy[1] + np.random.uniform(-150, 150), dem_miny + 100, dem_maxy - 100)
 
 
-        num_points = self.MAX_VERTICES
-        # “조금 더 큰 범위” -> 반지름 범위를 키움
-        radius = np.random.uniform(100, 200)
-
+        #num_points = self.MAX_VERTICES
+        #radius = np.random.uniform(100, 200)
+        '''
         angles = np.sort(np.random.uniform(0, 2 * np.pi, num_points))
         points = []
         for angle in angles:
@@ -732,20 +754,18 @@ class Fly_drone(gym.Env):
             fix_polygon(raw_target).buffer(self.POLY_ENLARGE),
             self.MAX_VERTICES
         )
-
+        '''
 
         state1 = [drone_xy[i] for i in range(2)]
         state2 = [drone_xy_velocity[i] for i in range(2)]
         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
-
-        target_vertices = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)
-        state = state1 + state2 + state3 + [drone_alt] + list(target_vertices.flatten())
+        state = state1 + [drone_alt] + state2 + state3 + [alt_error]
 
         return state
     
     def _check_done(self, ground_alt):
         # 1. Time limit
-        if time >= 600:
+        if time >= 2000:
             self.done = True
 
         # 2. Collision with ground
@@ -765,11 +785,6 @@ class Fly_drone(gym.Env):
             episodes.append(self.episode)
             fig, ax = plt.subplots(figsize=(16, 12), dpi=400)
             ax.imshow(dem, cmap='terrain', extent=(bounds.left, bounds.right, bounds.bottom, bounds.top), interpolation='none')
-
-            # Plot the target area
-            if self.target_area:
-                x, y = self.target_area.exterior.xy
-                ax.plot(x, y, 'y--', linewidth=2, label='Target Area')
 
             if all_polygons:
                 total_poly = unary_union(all_polygons)
