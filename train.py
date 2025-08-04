@@ -20,15 +20,15 @@ import yaml
 cfg = dict(
     algo="PPO",
     env_name="FlyDrone-v0",
-    total_timesteps=2_000_0000,#실행시 2_000_000, 테스트시 10_000,
+    total_timesteps=10_000,#실행시 2_000_000, 테스트시 10_000,
     log_every_steps=20,
     checkpoint_freq=10_000,
-    #lr=3e-4,
-    lr=0.00013296321722176043,
-    #n_steps=2048,
-    n_steps=1024,
-    #gamma=0.99,
-    gamma=0.9541215081998161,
+    lr=3e-4,
+    #lr=0.00013296321722176043,
+    n_steps=2048,
+    #n_steps=1024,
+    gamma=0.995,
+    #gamma=0.9541215081998161,
     etc="…"
 )
 
@@ -199,7 +199,6 @@ reward_plot_cb = RewardPlotCallback(PLOT_DIR, plot_every_episodes=20, verbose=1)
 
 print('> 학습 곧 시작')
 model.learn(total_timesteps=cfg["total_timesteps"], callback=[checkpoint_cb, reward_plot_cb, progress_cb])
-print('> 학습 시작')
 
 model.save(MODEL_DIR / "final_model")
 vec_env.save(MODEL_DIR / "vec_normalize.pkl")

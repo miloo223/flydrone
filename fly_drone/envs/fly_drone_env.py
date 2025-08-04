@@ -374,7 +374,7 @@ class Fly_drone(gym.Env):
     #"w_area": 2.560835061994321,
     #"w_alt": 1.5048324796298398,
     #"w_energy": 0.005251185724086418,
-    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 2.560835061994321, w_alt : float = 1.5048324796298398, w_energy: float = 0.005251185724086418, **kwargs):
+    def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.1, w_alt : float = 0.05, w_energy: float = 1e-4, **kwargs):
         self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9 + (self.MAX_VERTICES + 1) * 2 + 1,), dtype="float32") #set observation space size, range
         self.done = False
@@ -396,6 +396,8 @@ class Fly_drone(gym.Env):
         self.w_area   = w_area
         self.w_alt    = w_alt
         self.w_energy = w_energy
+        self.idle_counter = 0       
+        self._prev_area   = 0.0     
 
         (self._plot_dir / "maps").mkdir(parents=True, exist_ok=True)
     
@@ -604,17 +606,20 @@ class Fly_drone(gym.Env):
                 explored_area += area_reward
                 # 이제부터는 invalid 가능성을 낮추기 위해 effective_poly(= 실제로 카운트한 면적)만 저장
                 all_polygons.append(effective_poly)
+        if area_reward < 1.0:              # 새 면적 < 1 m²
+            self.idle_counter += 1
+        else:
+            self.idle_counter  = 0
+
         area_reward *= self.w_area
 
 
         # --------- 6) 고도 유지 보상 ---------
         target_altitude = ground_alt + 10
         altitude_error = abs(drone_alt - target_altitude)
-        altitude_reward = -0.1 * altitude_error
+        altitude_reward = -0.02 * altitude_error
         if drone_alt < ground_alt:
             altitude_reward -= 1000
-        elif drone_alt > ground_alt + 20:
-            altitude_reward -= 500
         altitude_reward *= self.w_alt
 
         # --------- 7) 에너지 패널티 계산 ---------
@@ -637,7 +642,10 @@ class Fly_drone(gym.Env):
         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
         px, py = px[0], py[0]
             
+        if (self.idle_counter >= 50): # idle이 50스텝 이상이면 끝
+            self.done = True
         self._check_done(ground_alt)
+
         if self.done:
             self.plot(self.train)
             self.episode += 1
@@ -645,7 +653,6 @@ class Fly_drone(gym.Env):
         self._log_buf.append((time, drone_xy[0], drone_xy[1], drone_alt))
         if self._step_idx % self.LOG_EVERY_STEPS == 0:
             self._flush_log()
-
         
 
         # info에 에너지 디버깅 정보 넣어두면 학습 중 로깅하기 좋음
@@ -653,9 +660,31 @@ class Fly_drone(gym.Env):
 
 
         # 100번마다 로그 나옴
+        '''
         if self._step_idx % 100 == 0:      # 100스텝마다
-            print(f"[env] ep{self.episode} step{self._step_idx}"
-                f"  t={time:.1f}s  reward={reward:.2f}")
+            #print(f"[env] ep{self.episode} step{self._step_idx}"
+            #    f"  t={time:.1f}s  reward={reward:.2f}")
+            v_xy = np.linalg.norm(drone_xy_velocity)
+            print((
+                f"[env] ep{self.episode:04d}  step{self._step_idx:05d}  t={time:6.1f}s\n"
+                f"       ▸ area_r={area_reward:8.2f}   alt_r={altitude_reward:8.2f}   "
+                f"eng_r={penalty_E:8.2f}   total_r={reward:8.2f}\n"
+                f"       ▸ explored={explored_area:8.1f} m²   "
+                f"pos=({drone_xy[0]:.1f}, {drone_xy[1]:.1f}, {drone_alt:.1f})   "
+                f"v_xy={v_xy:.2f} m/s   v_z={drone_z_velocity:.2f} m/s"
+            ))
+            '''
+        if self._step_idx % 100 == 0:
+            delta_area = explored_area - getattr(self, "_prev_area", 0)
+            self._prev_area = explored_area
+            print(f"[{self.episode:04d}|{self._step_idx:05d}]"
+                f" Δarea={delta_area:6.1f}  explored={explored_area:8.1f}"
+                f" | r_area={area_reward:+6.2f}"
+                f" r_alt={altitude_reward:+6.2f}"
+                f" r_E={penalty_E:+6.2f}"
+                f" | z={drone_alt:7.1f}"
+                f" err={altitude_error:5.1f}")
+
         # ---------------------------------------------------------
 
         return state, reward, self.done, info
@@ -666,6 +695,7 @@ class Fly_drone(gym.Env):
         global time, drone_xy, drone_xy_velocity, drone_alt, drone_z_velocity, roll, pitch, yaw, explored_area, all_polygons, drone_path
         all_polygons = []
         self.total_return = 0
+        self.idle_counter = 0
         self.done = False
         time = 0
         drone_xy = np.array([264300.0, 309370.0])
@@ -715,13 +745,13 @@ class Fly_drone(gym.Env):
     
     def _check_done(self, ground_alt):
         # 1. Time limit
-        if time >= 2000:
+        if time >= 600:
             self.done = True
 
         # 2. Collision with ground
         if drone_alt <= ground_alt:
             self.done = True
-            self.total_return -= 1000 # Large penalty for collision
+            self.total_return -= 50 # Large penalty for collision
 
     def settings(self, rend, train):
         self.train = train
