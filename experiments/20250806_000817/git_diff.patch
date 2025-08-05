@@ -1,0 +1,400 @@
+diff --git a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc
+index 37804d5..8199e32 100644
+Binary files a/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc and b/fly_drone/envs/__pycache__/fly_drone_env.cpython-312.pyc differ
+diff --git a/fly_drone/envs/fly_drone_env.py b/fly_drone/envs/fly_drone_env.py
+index ba94101..20b11cf 100644
+--- a/fly_drone/envs/fly_drone_env.py
++++ b/fly_drone/envs/fly_drone_env.py
+@@ -6,9 +6,8 @@ import math
+ import pylab
+ import rasterio
+ import matplotlib.pyplot as plt
+-from shapely.geometry import MultiPoint, Polygon
++from shapely.geometry import MultiPoint, Polygon, LineString, Point
+ from matplotlib.patches import Polygon as MplPolygon
+-from shapely.geometry import MultiPolygon
+ from shapely.ops import unary_union
+ import numpy as np
+ from dataclasses import dataclass
+@@ -147,6 +146,8 @@ DT = 0.1               # 당신이 step에서 쓰는 고정 dt
+ ATT_KP = 0.5           # (간단) 자세 제어 P 이득. 필요시 튜닝
+ quad_params = QuadParams()  # 에너지 계산용 파라미터
+ 
++
++
+ def attitude_torque_from_acc(acc_world, roll, pitch, params: QuadParams, kp=ATT_KP):
+     """
+     yaw = 0 가정.
+@@ -375,8 +376,9 @@ class Fly_drone(gym.Env):
+     #"w_alt": 1.5048324796298398,
+     #"w_energy": 0.005251185724086418,
+     def __init__(self, log_dir: Path, plot_dir: Path, w_area : float = 0.02, w_alt : float = 0.5, w_energy: float = 0.1, **kwargs):
+-        self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(4, ), dtype="float32") #set action space size, range
+-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9+1+1,), dtype="float32") #set observation space size, range
++        self.action_space = spaces.Box(low=-3.0, high=3.0, shape=(2, ), dtype="float32") #set action space size, range
++        self.RADAR_N = 24
++        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12+self.RADAR_N,), dtype="float32") #set observation space size, range
+         self.done = False
+         self.episode = 0
+         self.train = True
+@@ -400,7 +402,38 @@ class Fly_drone(gym.Env):
+         self._prev_area   = 0.0     
+ 
+         (self._plot_dir / "maps").mkdir(parents=True, exist_ok=True)
+-    
++
++        # ── 표준화용 상수 (DEM bounds 활용)
++        self.map_w = float(bounds.right - bounds.left)
++        self.map_h = float(bounds.top   - bounds.bottom)
++        self.cx    = float((bounds.left + bounds.right)  * 0.5)
++        self.cy    = float((bounds.bottom + bounds.top)  * 0.5)
++        # 월드 경계 사각형(라인 교차에 사용) + 라이다 최대 사거리
++        self.world_poly = Polygon([
++            (bounds.left,  bounds.bottom),
++            (bounds.right, bounds.bottom),
++            (bounds.right, bounds.top),
++            (bounds.left,  bounds.top)
++        ])
++        self.radar_R = max(self.map_w, self.map_h) + 1e-6  # 최대 레인지
++
++
++        # --- (에너지 정규화용 Hover 에너지 계산 & 람다 설정) ---
++    acc0 = np.array([0.0, 0.0, 0.0], dtype=np.float64)
++    vel0 = np.array([0.0, 0.0, 0.0], dtype=np.float64)
++    Mx0, My0 = 0.0, 0.0
++
++    # hover 에너지 한 스텝치 (lambda_energy는 계산에 영향 없음, info의 energy만 사용)
++    _, _, _, info0 = energy_penalty_from_action(acc0, vel0, Mx0, My0, quad_params, dt=DT)
++    E_hover = max(float(info0["energy"]), 1e-12)  # 0 division 방지
++
++    # 한 스텝에 원하는 '가중치 전' 패널티 규모 (예: -0.1)
++    target_penalty_per_step = 0.1
++    # energy_penalty_from_action 이 반환하는 penalty = -lambda_energy * energy 이므로
++    # lambda를 "목표 패널티 / Hover 에너지"로 두면, 정지/hover 시 약 -0.1이 됨
++    quad_params.lambda_energy = target_penalty_per_step / E_hover
++
++
+     def _flush_log(self):
+         """20스텝마다 호출되어 _log_buf → CSV 로 쓴다."""
+         if not self._log_buf:
+@@ -429,7 +462,7 @@ class Fly_drone(gym.Env):
+         if v_xy > self.max_xy_speed:
+             drone_xy_velocity *= (self.max_xy_speed / (v_xy + 1e-8))
+         # Z 속도 제한 (스칼라이므로 clip)
+-        drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
++        #drone_z_velocity = float(np.clip(drone_z_velocity, -self.max_z_speed, self.max_z_speed))
+ 
+     def seed(self, seed: Optional[int] = None): 
+         #옵튜나 때문에 만든 함수임
+@@ -438,33 +471,101 @@ class Fly_drone(gym.Env):
+         # 환경 안에서 np.random 대신 self.np_random 사용 권장
+         return [seed]
+     
+-    def _build_state(self) -> np.ndarray:
++    def _radar_intersect_dists_(self, ray: LineString, geom):
+         """
+-        x, y, z, vx, vy, vz, roll, pitch, yaw, explored_area 그리고
+-        target_area 폴리곤 꼭짓점들을 모두 합쳐서 반환합니다.
++        ray ∩ geom에서 '시작점→교차점'까지의 거리 목록을 반환.
++        geom은 Point/MultiPoint/LineString/MultiLineString/GeometryCollection 모두 처리.
+         """
+-        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
++        if geom is None:
++            return []
++        inter = ray.intersection(geom)
++        if inter.is_empty:
++            return []
++        pts = []
++        gt = inter.geom_type
++        if gt == "Point":
++            pts = [inter]
++        elif gt == "MultiPoint":
++            pts = list(inter.geoms)
++        elif gt in ("LineString", "MultiLineString"):
++            # 겹치는 경우: 선분의 양 끝을 후보로 사용 (0 거리가 나올 수 있음)
++            geoms = [inter] if gt == "LineString" else list(inter.geoms)
++            for g in geoms:
++                c = list(g.coords)
++                if len(c) >= 2:
++                    pts.append(Point(c[0]))
++                    pts.append(Point(c[-1]))
++        elif gt == "GeometryCollection":
++            for g in inter.geoms:
++                if g.geom_type == "Point":
++                    pts.append(g)
++                elif g.geom_type == "LineString":
++                    c = list(g.coords)
++                    if len(c) >= 2:
++                        pts.append(Point(c[0])); pts.append(Point(c[-1]))
++        # ray.project는 선분 거리(0..길이). 지금 ray는 직선 한 구간이라 유클리드 거리와 동일.
++        return [ray.project(p) for p in pts]
++
++
++    def _frontier_radar(self, x: float, y: float) -> np.ndarray:
++        """
++        드론 (x,y)에서 RADAR_N개 방향으로 레이를 쏴
++        '탐색 경계(frontier) 또는 월드 경계'까지의 최단 거리를 [0..1]로 정규화하여 반환.
++        """
++        # 후보 경계: (1) 이미 탐색한 영역의 경계, (2) 월드 경계
++        frontier = None
++        if all_polygons:
++            try:
++                union_poly = unary_union(all_polygons)
++                if not union_poly.is_empty:
++                    frontier = union_poly.boundary
++            except Exception:
++                frontier = None
++        world_boundary = self.world_poly.boundary
++
++        # 레이들 생성
++        R = self.radar_R
++        angles = np.linspace(0.0, 2.0*np.pi, num=self.RADAR_N, endpoint=False)
++        dists = np.empty(self.RADAR_N, dtype=np.float32)
++        for i, th in enumerate(angles):
++            x2 = x + R * np.cos(th)
++            y2 = y + R * np.sin(th)
++            ray = LineString([(x, y), (x2, y2)])
++
++            cand = []
++            if frontier is not None and not frontier.is_empty:
++                cand += self._radar_intersect_dists_(ray, frontier)
++            cand += self._radar_intersect_dists_(ray, world_boundary)
++
++            # 유효 후보 없으면 최대 사거리로 간주
++            d = min(cand) if len(cand) > 0 else R
++            dists[i] = np.clip(d / R, 0.0, 1.0)
++        return dists
+ 
+-        if not (0 <= px < width and 0 <= py < height):
+-            # out of bounds -> 끝내고 큰 페널티
+-            ground_alt = -1e6
+-        else:
+-            ground_alt = dem[py[0], px[0]]
+-        alt_error  = drone_alt - (ground_alt + 10.0)    
++
++    def _build_state(self) -> np.ndarray:
+         # 1) 위치·속도·자세·면적
+         state = [
+-            drone_xy[0], drone_xy[1], drone_alt,
++            drone_xy[0], drone_xy[1],
+             drone_xy_velocity[0], drone_xy_velocity[1], drone_z_velocity,
+             roll, pitch, yaw,
+             explored_area,
+-            alt_error
+         ]
+-        #ground = dem(self.pos[0], self.pos[1])
+-        #alt_error = drone_alt - (ground + 10.0)
+-            # 2) 타깃 폴리곤 꼭짓점
+-        #verts = as_fixed_length_coords(self.target_area, self.MAX_VERTICES)  # (N+1, 2) 배열
+-        #state.extend(verts.flatten().tolist())
+ 
++        # 2) 정규화 좌표: 중심 (cx, cy) 기준 [-1, 1]
++        nx = np.clip((drone_xy[0] - self.cx) / (self.map_w * 0.5 + 1e-9), -1.0, 1.0)
++        ny = np.clip((drone_xy[1] - self.cy) / (self.map_h * 0.5 + 1e-9), -1.0, 1.0)
++
++        # 3) 경계 근접도: 0(중앙) → 1(벽 바로 앞)
++        sx = (drone_xy[0] - bounds.left)   / (self.map_w + 1e-9)  # 0..1
++        sy = (drone_xy[1] - bounds.bottom) / (self.map_h + 1e-9)  # 0..1
++        margin_ratio = min(sx, 1.0 - sx, sy, 1.0 - sy)            # 0(벽)~0.5(중앙)
++        edge_prox = float(np.clip(1.0 - 2.0 * margin_ratio, 0.0, 1.0))
++
++        state += [nx, ny, edge_prox]
++
++        radar = self._frontier_radar(drone_xy[0], drone_xy[1])
++        state += radar.tolist()
+         return np.array(state, dtype=np.float32)
+     
+     def step(self, action):
+@@ -473,38 +574,38 @@ class Fly_drone(gym.Env):
+         global roll, pitch, yaw, explored_area, all_polygons, drone_path
+ 
+         # --------- 1) 액션 파싱 & yaw=0 강제 ---------
+-        ax, ay, az, _ = action.astype(np.float32)
++        ax, ay = action.astype(np.float32)
+         yaw = 0.0  # yaw는 쓰지 않으므로 0 고정  ### <--
+ 
++        # --------- 3) DEM/ground alt ---------
++        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
++        px, py = px[0], py[0]
++
++        if not (0 <= px < width and 0 <= py < height):
++            # out of bounds -> 끝내고 큰 페널티
++            reward = -1000.0
++            self.total_return += reward
++            self.done = True
++            ground_alt = None
++        else:
++            ground_alt = dem[py, px]
++            drone_alt = ground_alt + 10.0
++
+         # --------- 2) 상태 적분 ---------
+         time += DT
+         self._step_idx += 1
++
+         # pos
+         drone_xy[0] += ax * 0.5 * DT**2 + drone_xy_velocity[0] * DT
+         drone_xy[1] += ay * 0.5 * DT**2 + drone_xy_velocity[1] * DT
+-        drone_alt   += az * 0.5 * DT**2 + drone_z_velocity      * DT
++        #drone_alt   = dem[py, px] + 10
+         # vel
+         drone_xy_velocity[0] += ax * DT
+         drone_xy_velocity[1] += ay * DT
+-        drone_z_velocity     += az * DT
++        drone_z_velocity = 0.0
+         self._limit_speed()
+ 
+ 
+-        # --------- 3) DEM/ground alt ---------
+-        px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+-        px, py = px[0], py[0]
+-
+-        if not (0 <= px < width and 0 <= py < height):
+-            # out of bounds -> 끝내고 큰 페널티
+-            reward = -1000.0
+-            self.total_return += reward
+-            self.done = True
+-            #return self._build_state(), reward, self.done, {}
+-            return self._build_state(), reward, self.done, {}
+-    
+-        ground_alt = dem[py, px]
+-        alt_error  = drone_alt - (ground_alt + 10.0)
+-
+         '''
+         # --------- 4) 시야 레이캐스팅 (기존) ---------
+         u = np.linspace(-np.tan(FOV_RAD_X / 2), np.tan(FOV_RAD_X / 2), N)
+@@ -579,7 +680,20 @@ class Fly_drone(gym.Env):
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-        state = state1 + [drone_alt]+ state2 + state3 + [alt_error]
++        state = state1 + state2 + state3
++
++        nx = np.clip((drone_xy[0] - self.cx) / (self.map_w * 0.5 + 1e-9), -1.0, 1.0)
++        ny = np.clip((drone_xy[1] - self.cy) / (self.map_h * 0.5 + 1e-9), -1.0, 1.0)
++
++        # 3) 경계 근접도: 0(중앙) → 1(벽 바로 앞)
++        sx = (drone_xy[0] - bounds.left)   / (self.map_w + 1e-9)  # 0..1
++        sy = (drone_xy[1] - bounds.bottom) / (self.map_h + 1e-9)  # 0..1
++        margin_ratio = min(sx, 1.0 - sx, sy, 1.0 - sy)            # 0(벽)~0.5(중앙)
++        edge_prox = float(np.clip(1.0 - 2.0 * margin_ratio, 0.0, 1.0))
++
++        state += [nx, ny, edge_prox]
++        radar = self._frontier_radar(drone_xy[0], drone_xy[1])
++        state += radar.tolist()
+ 
+ 
+         # --------- 5) 면적 보상 (patched & robust) ---------
+@@ -626,7 +740,7 @@ class Fly_drone(gym.Env):
+ 
+         area_reward *= self.w_area
+ 
+-
++        '''
+         # --------- 6) 고도 유지 보상 ---------
+         target_altitude = ground_alt + 10
+         altitude_error = abs(drone_alt - target_altitude)
+@@ -637,12 +751,13 @@ class Fly_drone(gym.Env):
+         #altitude_reward = -0.05 * (alt_diff ** 2)            
+         altitude_reward = -max(0.0, np.exp(alt_diff* 0.05))
+         altitude_reward *= self.w_alt
++        '''
+ 
+         # --------- 7) 에너지 패널티 계산 ---------
+         #   - 여기서 Mx, My를 "원하는 선형가속도"로부터 만들고,
+         #   - yaw=0을 유지한다고 가정.
+-        acc_world = np.array([ax, ay, az], dtype=np.float64)
+-        vel_world = np.array([drone_xy_velocity[0], drone_xy_velocity[1], drone_z_velocity], dtype=np.float64)
++        acc_world = np.array([ax, ay, 0.0], dtype=np.float64) # 목표 az는 0으로 고정
++        vel_world = np.array([drone_xy_velocity[0], drone_xy_velocity[1], 0.0], dtype=np.float64)
+ 
+         Mx, My = attitude_torque_from_acc(acc_world, roll, pitch, quad_params, kp=ATT_KP)  #  <-- 핵심
+         penalty_E, omegas, powers, info_E = energy_penalty_from_action(
+@@ -651,16 +766,13 @@ class Fly_drone(gym.Env):
+         penalty_E  *= self.w_energy
+ 
+         # 전체 리워드
+-        reward = area_reward + altitude_reward + penalty_E
++        reward = area_reward  + penalty_E
+         self.total_return += reward
+ 
+         # --------- 8) 종료 조건 ---------
+         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+         px, py = px[0], py[0]
+-            
+-        if (self.idle_counter >= 50): # idle이 50스텝 이상이면 끝
+-            self.done = True
+-        self._check_done(ground_alt)
++        self._check_done()
+ 
+         if self.done:
+             self.plot(self.train)
+@@ -696,11 +808,10 @@ class Fly_drone(gym.Env):
+             v_xy = np.linalg.norm(drone_xy_velocity)
+             print(f"[{self.episode:04d}|{self._step_idx:05d}]"
+                 f" Δarea={delta_area:6.1f}  explored={explored_area:8.1f}"
+-                f" | r_area={area_reward:+6.2f}"
+-                f" r_alt={altitude_reward:+6.2f}"
++                f"| power={info_E['total_power']:.3e}W energy={info_E['energy']:.3e}J "
++                f" | r_area={area_reward:+6.2f}" 
+                 f" r_E={penalty_E:+6.2f}"
+                 f" | z={drone_alt:7.1f}"
+-                f" err={altitude_error:5.1f}"
+                 f" | v_xy={v_xy:.2f} m/s   v_z={drone_z_velocity:.2f} m/s"
+                 )
+                 
+@@ -721,7 +832,7 @@ class Fly_drone(gym.Env):
+         self._prev_area = 0.0
+         drone_xy = np.array([264300.0, 309370.0])
+         drone_xy_velocity = np.array([0.0, 0.0])
+-        drone_z_velocity = 0.0
++        #drone_z_velocity = 0.0
+         roll, pitch, yaw, explored_area = 0, 0, 0, 0
+         dem_minx, dem_miny, dem_maxx, dem_maxy = bounds
+ 
+@@ -730,7 +841,7 @@ class Fly_drone(gym.Env):
+         px, py = world_to_pixel(np.array([drone_xy[0]]), np.array([drone_xy[1]]))
+         ground_alt = dem[py[0], px[0]]
+         drone_alt = ground_alt + 10 #리셋 높이
+-        alt_error  = drone_alt - (ground_alt + 10.0)
++        #alt_error  = drone_alt - (ground_alt + 10.0)
+ 
+ 
+         # ---- Create a random *valid* target area with fixed number of vertices ----
+@@ -759,19 +870,34 @@ class Fly_drone(gym.Env):
+         state1 = [drone_xy[i] for i in range(2)]
+         state2 = [drone_xy_velocity[i] for i in range(2)]
+         state3 = [roll, pitch, yaw, drone_z_velocity, explored_area]
+-        state = state1 + [drone_alt] + state2 + state3 + [alt_error]
++        state = state1 + state2 + state3 
++
++        nx = np.clip((drone_xy[0] - self.cx) / (self.map_w * 0.5 + 1e-9), -1.0, 1.0)
++        ny = np.clip((drone_xy[1] - self.cy) / (self.map_h * 0.5 + 1e-9), -1.0, 1.0)
++
++        # 3) 경계 근접도: 0(중앙) → 1(벽 바로 앞)
++        sx = (drone_xy[0] - bounds.left)   / (self.map_w + 1e-9)  # 0..1
++        sy = (drone_xy[1] - bounds.bottom) / (self.map_h + 1e-9)  # 0..1
++        margin_ratio = min(sx, 1.0 - sx, sy, 1.0 - sy)            # 0(벽)~0.5(중앙)
++        edge_prox = float(np.clip(1.0 - 2.0 * margin_ratio, 0.0, 1.0))
++
++        state += [nx, ny, edge_prox]
++        radar = self._frontier_radar(drone_xy[0], drone_xy[1])
++        state += radar.tolist()
+ 
+         return state
+     
+-    def _check_done(self, ground_alt):
++    def _check_done(self):
+         # 1. Time limit
+-        if time >= 2000:
++        if time >= 300:
+             self.done = True
+ 
++        '''
+         # 2. Collision with ground
+         if drone_alt <= ground_alt:
+             self.done = True
+             self.total_return -= 50 # Large penalty for collision
++        '''
+ 
+     def settings(self, rend, train):
+         self.train = train
